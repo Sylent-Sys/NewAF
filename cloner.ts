@@ -31,6 +31,7 @@ interface CloneOptions {
   oldSolutionName: string;
   newSolutionName: string;
   force: boolean;
+  template: boolean;
 }
 
 interface ProjectInfo {
@@ -44,6 +45,7 @@ class CSharpProjectCloner {
   private options: CloneOptions;
   private projectMap: Map<string, ProjectInfo> = new Map();
   private createdTargetDir = false;
+  private deletedTypes: Set<string> = new Set();
 
   constructor(options: CloneOptions) {
     this.options = options;
@@ -53,6 +55,9 @@ class CSharpProjectCloner {
     console.log(`🚀 Starting C# project clone from "${this.options.sourcePath}" to "${this.options.targetPath}"`);
     console.log(`📝 Namespace: ${this.options.oldNamespace} → ${this.options.newNamespace}`);
     console.log(`📦 Solution: ${this.options.oldSolutionName} → ${this.options.newSolutionName}`);
+    if (this.options.template) {
+      console.log(`🧹 Template Mode: ENABLED (Removing distinct business logic)`);
+    }
 
     try {
       // Validate source path
@@ -81,6 +86,11 @@ class CSharpProjectCloner {
 
       // Copy and transform all projects
       await this.copyProjects();
+
+      // Apply template changes (remove logic and sanitise startup)
+      if (this.options.template) {
+        await this.applyTemplateChanges();
+      }
 
       // Create new solution file
       await this.createNewSolutionFile();
@@ -203,6 +213,143 @@ class CSharpProjectCloner {
       // Transform Project content files (cs, xml, etc)
       await this.transformProjectFiles(newProjectPath);
     }
+  }
+
+  private async applyTemplateChanges(): Promise<void> {
+    console.log('🧹 Purging logic files...');
+
+    // We need to walk through the *target* projects and specifically look for Logic, Repository, etc.
+    // Since we renamed projects, we need to look in the renamed paths.
+
+    for (const [guid, projectInfo] of this.projectMap) {
+      const newProjectName = this.transformProjectName(projectInfo.name);
+      const newProjectPath = join(this.options.targetPath, newProjectName);
+
+      // Helper to determine if a project is a certain layer based on name
+      const isBLL = newProjectName.endsWith('.BLL');
+      const isDAL = newProjectName.endsWith('.DAL');
+      const isAPI = newProjectName.endsWith('.BackEndAPI') || newProjectName.endsWith('.API');
+
+      if (isBLL && existsSync(newProjectPath)) {
+        await this.purgeLogicFolders(newProjectPath);
+      }
+
+      if (isDAL && existsSync(newProjectPath)) {
+        await this.purgeRepositories(newProjectPath);
+      }
+
+      // We handle Startup/Program separately after gathering all deleted types
+    }
+
+    // Now cleanup Startup.cs / Program.cs in API projects
+    for (const [guid, projectInfo] of this.projectMap) {
+      const newProjectName = this.transformProjectName(projectInfo.name);
+      const isAPI = newProjectName.endsWith('.BackEndAPI') || newProjectName.endsWith('.API');
+
+      if (isAPI) {
+        const newProjectPath = join(this.options.targetPath, newProjectName);
+        await this.sanitizeStartup(newProjectPath);
+      }
+    }
+  }
+
+  private async purgeLogicFolders(directory: string): Promise<void> {
+    const items = readdirSync(directory);
+
+    for (const item of items) {
+      const itemPath = join(directory, item);
+      const stat = statSync(itemPath);
+
+      if (stat.isDirectory()) {
+        // Check if it's a Logic folder (ending in Logic)
+        if (item.endsWith('Logic')) {
+          console.log(`  Deleting BLL Logic Folder: ${item}`);
+          // Track the types that might be in here (simple heuristic: folder name often matches main class name)
+          this.deletedTypes.add(item);
+          // Also try to read the directory to find file names (e.g. AnnouncementLogic.cs)
+          try {
+            const subFiles = readdirSync(itemPath);
+            for (const sub of subFiles) {
+              if (sub.endsWith('.cs') && sub.includes('Logic')) {
+                this.deletedTypes.add(sub.replace('.cs', ''));
+              }
+            }
+          } catch { }
+
+          rmSync(itemPath, { recursive: true, force: true });
+        } else {
+          // Recurse into subdirectories (e.g. if structure is deeper)
+          await this.purgeLogicFolders(itemPath);
+        }
+      }
+    }
+  }
+
+  private async purgeRepositories(directory: string): Promise<void> {
+    const items = readdirSync(directory);
+
+    for (const item of items) {
+      const itemPath = join(directory, item);
+      const stat = statSync(itemPath);
+
+      if (stat.isDirectory()) {
+        await this.purgeRepositories(itemPath);
+      } else if (stat.isFile()) {
+        // Check if it's a Repository file (ending in Repository.cs) AND in a directory likely named Repositories (or sub)
+        // Or just blanket replace *Repository.cs files that aren't base classes?
+        // Let's be aggressive for template mode: delete *Repository.cs
+        // BUT we should probably exclude core ones like 'BaseRepository' if they exist.
+        // For now, let's target files ending in Repository.cs that aren't generic interfaces.
+
+        if (item.endsWith('Repository.cs') && !item.startsWith('I') && item !== 'BaseRepository.cs' && item !== 'Repository.cs') {
+          console.log(`  Deleting DAL Repository: ${item}`);
+          this.deletedTypes.add(item.replace('.cs', ''));
+          // Also add interface name guess
+          this.deletedTypes.add(`I${item.replace('.cs', '')}`);
+          unlinkSync(itemPath);
+        }
+      }
+    }
+  }
+
+  private async sanitizeStartup(projectPath: string): Promise<void> {
+    // Look for Startup.cs or Program.cs
+    const files = readdirSync(projectPath);
+    const startupFile = files.find(f => f === 'Startup.cs' || f === 'Program.cs');
+
+    if (!startupFile) return;
+
+    const startupPath = join(projectPath, startupFile);
+    let content = readFileSync(startupPath, 'utf-8');
+    const lines = content.split('\n');
+    const newLines = [];
+
+    for (const line of lines) {
+      let shouldComment = false;
+      // Check if line contains registration for any deleted type
+      // Matches: <IDeletedType, DeletedType> or (typeof(DeletedType))
+      for (const typeName of this.deletedTypes) {
+        // Regex checking for word boundaries to avoid partial matches
+        // e.g. "AnnouncementLogic" should not match "AnnouncementLogicHelper" if that existed (unlikely, but safe)
+        const regex = new RegExp(`\\b${typeName}\\b`);
+        if (regex.test(line)) {
+          // Double check it's a service registration
+          if (line.trim().startsWith('services.Add') || line.trim().startsWith('.')) { // .Add... chain
+            shouldComment = true;
+            break;
+          }
+        }
+      }
+
+      if (shouldComment && !line.trim().startsWith('//')) {
+        console.log(`  Commenting out DI registration: ${line.trim()}`);
+        newLines.push(`// ${line}`);
+      } else {
+        newLines.push(line);
+      }
+    }
+
+    writeFileSync(startupPath, newLines.join('\n'));
   }
 
   private async copyDirectory(source: string, target: string): Promise<void> {
@@ -434,7 +581,7 @@ async function main() {
     console.log(`
 🔧 C# Project Cloner
 
-Usage: bun cloner.ts <source-path> <target-path> <old-namespace> <new-namespace> [old-solution-name] [new-solution-name] [--force]
+Usage: bun cloner.ts <source-path> <target-path> <old-namespace> <new-namespace> [old-solution-name] [new-solution-name] [--force] [--template]
 
 Arguments:
   source-path      Path to the source C# project directory
@@ -446,17 +593,20 @@ Arguments:
 
 Options:
   --force          Overwrite target directory if it exists and is not empty
+  --template       Clone as a template (removes specific business logic, keeps infrastructure)
 
 Examples:
   bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject
-  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject --force
+  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject --force --template
     `);
     process.exit(1);
   }
 
-  // Parse force flag
+  // Parse flags
   const force = args.includes('--force');
-  const cleanArgs = args.filter(arg => arg !== '--force');
+  const template = args.includes('--template');
+
+  const cleanArgs = args.filter(arg => arg !== '--force' && arg !== '--template');
 
   const [sourcePath, targetPath, oldNamespace, newNamespace, oldSolutionName, newSolutionName] = cleanArgs;
 
@@ -478,7 +628,8 @@ Examples:
     newNamespace: newNamespace,
     oldSolutionName: detectedSolutionName,
     newSolutionName: finalNewSolutionName,
-    force: force
+    force: force,
+    template: template
   };
 
   const cloner = new CSharpProjectCloner(options);
