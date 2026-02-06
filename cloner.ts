@@ -1,8 +1,27 @@
 #!/usr/bin/env bun
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, statSync, readdirSync, unlinkSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, statSync, readdirSync, unlinkSync, rmSync } from 'fs';
 import { join, dirname, basename, extname, relative } from 'path';
 import { spawnSync } from 'child_process';
+
+/**
+ * List of file extensions that should be processed as text files
+ * and have their content transformed (namespaces replaced).
+ */
+const TEXT_FILE_EXTENSIONS = [
+  '.cs',
+  '.xml',
+  '.json',
+  '.config',
+  '.xaml',
+  '.cshtml',
+  '.razor',
+  '.html',
+  '.js',
+  '.ts',
+  '.css',
+  '.asax'
+];
 
 interface CloneOptions {
   sourcePath: string;
@@ -11,6 +30,7 @@ interface CloneOptions {
   newNamespace: string;
   oldSolutionName: string;
   newSolutionName: string;
+  force: boolean;
 }
 
 interface ProjectInfo {
@@ -23,6 +43,7 @@ interface ProjectInfo {
 class CSharpProjectCloner {
   private options: CloneOptions;
   private projectMap: Map<string, ProjectInfo> = new Map();
+  private createdTargetDir = false;
 
   constructor(options: CloneOptions) {
     this.options = options;
@@ -32,11 +53,21 @@ class CSharpProjectCloner {
     console.log(`🚀 Starting C# project clone from "${this.options.sourcePath}" to "${this.options.targetPath}"`);
     console.log(`📝 Namespace: ${this.options.oldNamespace} → ${this.options.newNamespace}`);
     console.log(`📦 Solution: ${this.options.oldSolutionName} → ${this.options.newSolutionName}`);
-    
+
     try {
       // Validate source path
       if (!existsSync(this.options.sourcePath)) {
         throw new Error(`Source path does not exist: ${this.options.sourcePath}`);
+      }
+
+      // Check target directory
+      if (existsSync(this.options.targetPath)) {
+        const files = readdirSync(this.options.targetPath);
+        if (files.length > 0 && !this.options.force) {
+          throw new Error(`Target directory "${this.options.targetPath}" is not empty. Use --force to overwrite.`);
+        }
+      } else {
+        this.createdTargetDir = true;
       }
 
       // Create target directory
@@ -58,6 +89,17 @@ class CSharpProjectCloner {
       console.log(`📁 New project location: ${this.options.targetPath}`);
     } catch (error) {
       console.error('❌ Error during cloning:', error);
+
+      // Cleanup if we created the directory and cloning failed
+      if (this.createdTargetDir && existsSync(this.options.targetPath)) {
+        try {
+          console.log(`🧹 Cleaning up created target directory: ${this.options.targetPath}`);
+          rmSync(this.options.targetPath, { recursive: true, force: true });
+        } catch (cleanupError) {
+          console.warn('⚠️  Failed to cleanup target directory:', cleanupError);
+        }
+      }
+
       throw error;
     }
   }
@@ -65,7 +107,7 @@ class CSharpProjectCloner {
   private async parseSolutionFile(): Promise<void> {
     // Try to find the solution file
     let solutionPath = join(this.options.sourcePath, `${this.options.oldSolutionName}.sln`);
-    
+
     if (!existsSync(solutionPath)) {
       // Auto-detect solution file
       const files = readdirSync(this.options.sourcePath);
@@ -83,13 +125,13 @@ class CSharpProjectCloner {
 
     for (const line of lines) {
       const trimmedLine = line.trim();
-      
+
       // Parse project entries
       if (trimmedLine.startsWith('Project(')) {
         const projectMatch = trimmedLine.match(/Project\("([^"]+)"\) = "([^"]+)", "([^"]+)", "([^"]+)"/);
         if (projectMatch) {
           const [, , projectName, projectPath, projectGuid] = projectMatch;
-          
+
           if (projectName && projectPath && projectGuid) {
             this.projectMap.set(projectGuid, {
               name: projectName,
@@ -100,7 +142,7 @@ class CSharpProjectCloner {
           }
         }
       }
-      
+
       // Parse project dependencies
       if (trimmedLine.startsWith('{') && trimmedLine.includes('} = {')) {
         const depMatch = trimmedLine.match(/\{([^}]+)\} = \{([^}]+)\}/);
@@ -146,20 +188,20 @@ class CSharpProjectCloner {
       const sourceProjectPath = join(this.options.sourcePath, dirname(projectInfo.path));
       const newProjectName = this.transformProjectName(projectInfo.name);
       const newProjectPath = join(this.options.targetPath, newProjectName);
-      
+
       console.log(`📂 Copying project: ${projectInfo.name} → ${newProjectName}`);
-      
+
       // Create project directory
       this.ensureDirectoryExists(newProjectPath);
-      
+
       // Copy project files
       await this.copyDirectory(sourceProjectPath, newProjectPath);
-      
+
       // Transform project file
       await this.transformProjectFile(newProjectPath, newProjectName);
-      
-      // Transform C# files
-      await this.transformCSharpFiles(newProjectPath);
+
+      // Transform Project content files (cs, xml, etc)
+      await this.transformProjectFiles(newProjectPath);
     }
   }
 
@@ -170,14 +212,14 @@ class CSharpProjectCloner {
     }
 
     this.ensureDirectoryExists(target);
-    
+
     const items = readdirSync(source);
-    
+
     for (const item of items) {
       const sourcePath = join(source, item);
       const targetPath = join(target, item);
       const stat = statSync(sourcePath);
-      
+
       if (stat.isDirectory()) {
         // Skip certain directories
         if (['bin', 'obj', '.vs', '.git'].includes(item)) {
@@ -196,7 +238,7 @@ class CSharpProjectCloner {
 
   private async transformProjectFile(projectPath: string, newProjectName: string): Promise<void> {
     const projectFile = join(projectPath, `${newProjectName}.csproj`);
-    
+
     if (!existsSync(projectFile)) {
       // Find the actual project file
       const files = readdirSync(projectPath);
@@ -205,7 +247,7 @@ class CSharpProjectCloner {
         const oldProjectFile = join(projectPath, csprojFile);
         const newProjectFile = join(projectPath, `${newProjectName}.csproj`);
         copyFileSync(oldProjectFile, newProjectFile);
-        
+
         // Remove old project file
         unlinkSync(oldProjectFile);
       }
@@ -213,68 +255,79 @@ class CSharpProjectCloner {
 
     if (existsSync(projectFile)) {
       let content = readFileSync(projectFile, 'utf-8');
-      
+
       // Update project references - process in reverse order to avoid conflicts
       const sortedProjects = Array.from(this.projectMap.entries()).sort((a, b) => b[1].name.length - a[1].name.length);
-      
+
       for (const [guid, projectInfo] of sortedProjects) {
         const oldProjectName = projectInfo.name;
         const newProjectName = this.transformProjectName(projectInfo.name);
-        
+
         // Replace project reference paths
         const oldRefPath = `..\\${oldProjectName}\\${oldProjectName}.csproj`;
         const newRefPath = `..\\${newProjectName}\\${newProjectName}.csproj`;
-        
+
         content = content.replace(
           new RegExp(this.escapeRegex(oldRefPath), 'g'),
           newRefPath
         );
-        
+
         // Also replace with forward slashes (in case the original had forward slashes)
         const oldRefPathForward = `../${oldProjectName}/${oldProjectName}.csproj`;
         const newRefPathForward = `../${newProjectName}/${newProjectName}.csproj`;
-        
+
         content = content.replace(
           new RegExp(this.escapeRegex(oldRefPathForward), 'g'),
           newRefPathForward
         );
       }
-      
+
       writeFileSync(projectFile, content);
       console.log(`📝 Updated project references in: ${basename(projectFile)}`);
     }
   }
 
-  private async transformCSharpFiles(directory: string): Promise<void> {
+  private async transformProjectFiles(directory: string): Promise<void> {
     const items = readdirSync(directory);
-    
+
     for (const item of items) {
       const itemPath = join(directory, item);
       const stat = statSync(itemPath);
-      
+
       if (stat.isDirectory()) {
-        await this.transformCSharpFiles(itemPath);
-      } else if (item.endsWith('.cs')) {
-        await this.transformCSharpFile(itemPath);
+        await this.transformProjectFiles(itemPath);
+      } else {
+        const ext = extname(item).toLowerCase();
+        if (TEXT_FILE_EXTENSIONS.includes(ext)) {
+          await this.transformFile(itemPath);
+        }
       }
     }
   }
 
-  private async transformCSharpFile(filePath: string): Promise<void> {
+  private async transformFile(filePath: string): Promise<void> {
     let content = readFileSync(filePath, 'utf-8');
-    
+
     // Replace namespace declarations
     const namespaceRegex = new RegExp(`namespace\\s+${this.escapeRegex(this.options.oldNamespace)}`, 'g');
     content = content.replace(namespaceRegex, `namespace ${this.options.newNamespace}`);
-    
+
     // Replace using statements
     const usingRegex = new RegExp(`using\\s+${this.escapeRegex(this.options.oldNamespace)}`, 'g');
     content = content.replace(usingRegex, `using ${this.options.newNamespace}`);
-    
+
     // Replace class/interface/struct names that contain the old namespace
     const classRegex = new RegExp(`\\b${this.escapeRegex(this.options.oldNamespace)}\\.`, 'g');
     content = content.replace(classRegex, `${this.options.newNamespace}.`);
-    
+
+    // General string replacement for other file types (config, xml, etc)
+    // This is safer for non-compiled files where explicit "using" or "namespace" keywords might not exist
+    // but the string value needs to be updated.
+    if (!filePath.endsWith('.cs')) {
+      const generalRegex = new RegExp(this.escapeRegex(this.options.oldNamespace), 'g');
+      content = content.replace(generalRegex, this.options.newNamespace);
+    }
+
     writeFileSync(filePath, content);
   }
 
@@ -290,9 +343,9 @@ class CSharpProjectCloner {
       }
       originalSolutionPath = join(this.options.sourcePath, sln);
     }
-    
+
     let content = readFileSync(originalSolutionPath, 'utf-8');
-    
+
     // Replace solution name occurrences in content (use detected old name if available)
     if (this.options.oldSolutionName) {
       content = content.replace(
@@ -300,27 +353,27 @@ class CSharpProjectCloner {
         this.options.newSolutionName
       );
     }
-    
+
     // Replace project names and paths - process in reverse order to avoid conflicts
     const sortedProjects = Array.from(this.projectMap.entries()).sort((a, b) => b[1].name.length - a[1].name.length);
-    
+
     for (const [guid, projectInfo] of sortedProjects) {
       const newProjectName = this.transformProjectName(projectInfo.name);
       const newProjectPath = `${newProjectName}\\${newProjectName}.csproj`;
-      
+
       // Replace project name in Project line - use regex with word boundaries
       content = content.replace(
         new RegExp(`"${this.escapeRegex(projectInfo.name)}"`, 'g'),
         `"${newProjectName}"`
       );
-      
+
       // Replace project path
       content = content.replace(
         new RegExp(`"${this.escapeRegex(projectInfo.path)}"`, 'g'),
         `"${newProjectPath}"`
       );
     }
-    
+
     writeFileSync(solutionPath, content);
     console.log(`📄 Created new solution file: ${solutionPath}`);
 
@@ -376,12 +429,12 @@ class CSharpProjectCloner {
 // CLI Interface
 async function main() {
   const args = process.argv.slice(2);
-  
-  if (args.length < 4) {
+
+  if (args.length < 4 || args.includes('--help')) {
     console.log(`
 🔧 C# Project Cloner
 
-Usage: bun cloner.ts <source-path> <target-path> <old-namespace> <new-namespace> [old-solution-name] [new-solution-name]
+Usage: bun cloner.ts <source-path> <target-path> <old-namespace> <new-namespace> [old-solution-name] [new-solution-name] [--force]
 
 Arguments:
   source-path      Path to the source C# project directory
@@ -391,24 +444,31 @@ Arguments:
   old-solution-name (optional) Current solution name (default: auto-detect)
   new-solution-name (optional) New solution name (default: based on new namespace)
 
+Options:
+  --force          Overwrite target directory if it exists and is not empty
+
 Examples:
   bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject
-  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject Bion.NAS.Platform MyCompany.MyProject
+  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject --force
     `);
     process.exit(1);
   }
 
-  const [sourcePath, targetPath, oldNamespace, newNamespace, oldSolutionName, newSolutionName] = args;
-  
+  // Parse force flag
+  const force = args.includes('--force');
+  const cleanArgs = args.filter(arg => arg !== '--force');
+
+  const [sourcePath, targetPath, oldNamespace, newNamespace, oldSolutionName, newSolutionName] = cleanArgs;
+
   // Validate required arguments
   if (!sourcePath || !targetPath || !oldNamespace || !newNamespace) {
     console.error('❌ Missing required arguments');
     process.exit(1);
   }
-  
+
   // Auto-detect solution name if not provided
   const detectedSolutionName = oldSolutionName || basename(sourcePath);
-  // Default the new solution name to the FULL new namespace to avoid mismatch (e.g., Bion.ForumSummary)
+  // Default the new solution name to the FULL new namespace
   const finalNewSolutionName = newSolutionName || newNamespace || 'NewProject';
 
   const options: CloneOptions = {
@@ -417,7 +477,8 @@ Examples:
     oldNamespace: oldNamespace,
     newNamespace: newNamespace,
     oldSolutionName: detectedSolutionName,
-    newSolutionName: finalNewSolutionName
+    newSolutionName: finalNewSolutionName,
+    force: force
   };
 
   const cloner = new CSharpProjectCloner(options);
