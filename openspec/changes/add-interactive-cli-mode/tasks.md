@@ -15,10 +15,10 @@ Implementation tasks for adding interactive CLI mode to the C# Project Cloner, o
 Install and configure the @inquirer/prompts package for interactive CLI prompts.
 
 **Acceptance Criteria:**
-- [ ] Run `bun add @inquirer/prompts`
-- [ ] Verify installation in package.json
-- [ ] Test basic import in a scratch file
-- [ ] Remove scratch file after verification
+- [x] Run `bun add @inquirer/prompts`
+- [x] Verify installation in package.json
+- [x] Test basic import in a scratch file
+- [x] Remove scratch file after verification
 
 **Files Changed:**
 - `package.json`
@@ -35,16 +35,16 @@ Install and configure the @inquirer/prompts package for interactive CLI prompts.
 Extract existing validation logic into standalone, reusable functions that can be shared between CLI and interactive modes.
 
 **Acceptance Criteria:**
-- [ ] Create validation utility functions:
+- [x] Create validation utility functions:
   - `validateNamespaceFormat()`
   - `validatePathExists()`
   - `validatePathIsDirectory()`
   - `validateSolutionDirectory()`
   - `validateNamespacesAreDifferent()`
   - `validateTargetPath()`
-- [ ] Each function returns `boolean | string` (true or error message)
-- [ ] Add TypeScript JSDoc comments for each function
-- [ ] All validation follows spec requirements
+- [x] Each function returns `boolean | string` (true or error message)
+- [x] Add TypeScript JSDoc comments for each function
+- [x] All validation follows spec requirements
 
 **Files Changed:**
 - `cloner.ts` (add validation functions section)
@@ -63,10 +63,10 @@ Extract existing validation logic into standalone, reusable functions that can b
 Create a function to detect whether to run in CLI or interactive mode based on command-line arguments.
 
 **Acceptance Criteria:**
-- [ ] Implement `detectMode()` function
-- [ ] Returns `'cli'` when args present (excluding --help)
-- [ ] Returns `'interactive'` when no args present
-- [ ] Optional: Support `--interactive` flag to force interactive mode
+- [x] Implement `detectMode()` function
+- [x] Returns `'cli'` when args present (excluding --help)
+- [x] Returns `'interactive'` when no args present
+- [x] Optional: Support `--interactive` flag to force interactive mode
 - [ ] Add unit tests
 
 **Files Changed:**
@@ -90,12 +90,12 @@ Create a function to detect whether to run in CLI or interactive mode based on c
 Create interactive prompt for collecting and validating source directory path.
 
 **Acceptance Criteria:**
-- [ ] Implement `promptSourcePath()` function
-- [ ] Use @inquirer/input with validation
-- [ ] Validate path exists, is directory, contains .sln
-- [ ] Show clear error messages inline
-- [ ] Allow retry on validation failure
-- [ ] Return absolute path
+- [x] Implement `promptSourcePath()` function
+- [x] Use @inquirer/input with validation
+- [x] Validate path exists, is directory, contains .sln
+- [x] Show clear error messages inline
+- [x] Allow retry on validation failure
+- [x] Return absolute path
 
 **Files Changed:**
 - `cloner.ts` (add promptSourcePath function)
@@ -117,13 +117,13 @@ Create interactive prompt for collecting and validating source directory path.
 Create function to detect solution information from source directory.
 
 **Acceptance Criteria:**
-- [ ] Implement `detectSolutionInfo()` function
-- [ ] Find .sln file in source directory
-- [ ] Parse solution to count projects (reuse existing logic)
-- [ ] Attempt namespace detection from solution name or first .csproj
-- [ ] Return SolutionInfo interface
-- [ ] Handle multiple .sln files (use first found)
-- [ ] Display detected info to console
+- [x] Implement `detectSolutionInfo()` function
+- [x] Find .sln file in source directory
+- [x] Parse solution to count projects (reuse existing logic)
+- [x] Attempt namespace detection from solution name or first .csproj
+- [x] Return SolutionInfo interface
+- [x] Handle multiple .sln files (use first found)
+- [x] Display detected info to console
 
 **Files Changed:**
 - `cloner.ts` (add detectSolutionInfo function and SolutionInfo interface)
@@ -144,13 +144,13 @@ Create function to detect solution information from source directory.
 Create interactive prompts for collecting old and new namespaces with validation.
 
 **Acceptance Criteria:**
-- [ ] Implement `promptNamespaces()` function
-- [ ] Prompt for old namespace with detected default
-- [ ] Prompt for new namespace (no default)
-- [ ] Validate both using shared validators
-- [ ] Ensure namespaces are different
-- [ ] Show validation errors inline
-- [ ] Return `{old: string, new: string}`
+- [x] Implement `promptNamespaces()` function
+- [x] Prompt for old namespace with detected default
+- [x] Prompt for new namespace (no default)
+- [x] Validate both using shared validators
+- [x] Ensure namespaces are different
+- [x] Show validation errors inline
+- [x] Return `{old: string, new: string}`
 
 **Files Changed:**
 - `cloner.ts` (add promptNamespaces function)
@@ -173,12 +173,12 @@ Create interactive prompts for collecting old and new namespaces with validation
 Create interactive prompt for target directory path with smart defaults.
 
 **Acceptance Criteria:**
-- [ ] Implement `promptTargetPath()` function
-- [ ] Suggest default based on new namespace
-- [ ] Validate parent directory exists
-- [ ] Check if target exists and is empty
-- [ ] Handle target validation
-- [ ] Return absolute path
+- [x] Implement `promptTargetPath()` function
+- [x] Suggest default based on new namespace
+- [x] Validate parent directory exists
+- [x] Check if target exists and is empty
+- [x] Handle target validation
+- [x] Return absolute path
 
 **Files Changed:**
 - `cloner.ts` (add promptTargetPath function)
@@ -200,13 +200,13 @@ Create interactive prompt for target directory path with smart defaults.
 Create prompts for clone mode and force overwrite options.
 
 **Acceptance Criteria:**
-- [ ] Implement `promptOptions()` function
-- [ ] Use @inquirer/select for clone mode
-- [ ] Options: "Full copy" and "Template"
-- [ ] Show description of template mode purging
-- [ ] Use @inquirer/confirm for force overwrite (if needed)
-- [ ] Only prompt for force if target exists and not empty
-- [ ] Return `{template: boolean, force: boolean}`
+- [x] Implement `promptOptions()` function
+- [x] Use @inquirer/select for clone mode
+- [x] Options: "Full copy" and "Template"
+- [x] Show description of template mode purging
+- [x] Use @inquirer/confirm for force overwrite (if needed)
+- [x] Only prompt for force if target exists and not empty
+- [x] Return `{template: boolean, force: boolean}`
 
 **Files Changed:**
 - `cloner.ts` (add promptOptions function)
@@ -228,12 +228,12 @@ Create prompts for clone mode and force overwrite options.
 Create function to display formatted summary of all collected inputs.
 
 **Acceptance Criteria:**
-- [ ] Implement `showSummary()` function
-- [ ] Display all CloneOptions in formatted box
-- [ ] Include source, target, namespaces, solution names, project count
-- [ ] Show clone mode and force status
-- [ ] Use box-drawing characters for visual appeal
-- [ ] Show template purging info if applicable
+- [x] Implement `showSummary()` function
+- [x] Display all CloneOptions in formatted box
+- [x] Include source, target, namespaces, solution names, project count
+- [x] Show clone mode and force status
+- [x] Use box-drawing characters for visual appeal
+- [x] Show template purging info if applicable
 
 **Files Changed:**
 - `cloner.ts` (add showSummary function)
@@ -254,11 +254,11 @@ Create function to display formatted summary of all collected inputs.
 Create final confirmation prompt before starting clone operation.
 
 **Acceptance Criteria:**
-- [ ] Implement `confirmProceed()` function
-- [ ] Use @inquirer/confirm
-- [ ] Default to "Yes"
-- [ ] Return boolean
-- [ ] Clear prompt text
+- [x] Implement `confirmProceed()` function
+- [x] Use @inquirer/confirm
+- [x] Default to "Yes"
+- [x] Return boolean
+- [x] Clear prompt text
 
 **Files Changed:**
 - `cloner.ts` (add confirmProceed function)
@@ -279,8 +279,8 @@ Create final confirmation prompt before starting clone operation.
 Create main orchestrator function that calls all prompt functions in sequence and assembles CloneOptions.
 
 **Acceptance Criteria:**
-- [ ] Implement `collectInteractiveInputs()` async function
-- [ ] Call prompts in correct order:
+- [x] Implement `collectInteractiveInputs()` async function
+- [x] Call prompts in correct order:
   1. Welcome message
   2. Source path
   3. Solution detection
@@ -289,10 +289,10 @@ Create main orchestrator function that calls all prompt functions in sequence an
   6. Options
   7. Summary
   8. Confirmation
-- [ ] Assemble CloneOptions from collected inputs
-- [ ] Handle cancellation gracefully (Ctrl+C)
-- [ ] Return CloneOptions if confirmed, exit if declined
-- [ ] Add try-catch for prompt errors
+- [x] Assemble CloneOptions from collected inputs
+- [x] Handle cancellation gracefully (Ctrl+C)
+- [x] Return CloneOptions if confirmed, exit if declined
+- [x] Add try-catch for prompt errors
 
 **Files Changed:**
 - `cloner.ts` (add collectInteractiveInputs function)
@@ -315,13 +315,13 @@ Create main orchestrator function that calls all prompt functions in sequence an
 Update main() to support both CLI and interactive modes based on mode detection.
 
 **Acceptance Criteria:**
-- [ ] Detect mode at start of main()
-- [ ] Route to CLI parser if mode is 'cli'
-- [ ] Route to interactive collector if mode is 'interactive'
-- [ ] Both paths produce CloneOptions
-- [ ] Pass options to CSharpProjectCloner (unchanged)
-- [ ] Preserve existing CLI error handling
-- [ ] Add interactive mode error handling
+- [x] Detect mode at start of main()
+- [x] Route to CLI parser if mode is 'cli'
+- [x] Route to interactive collector if mode is 'interactive'
+- [x] Both paths produce CloneOptions
+- [x] Pass options to CSharpProjectCloner (unchanged)
+- [x] Preserve existing CLI error handling
+- [x] Add interactive mode error handling
 
 **Files Changed:**
 - `cloner.ts` (refactor main function)
@@ -343,10 +343,10 @@ Update main() to support both CLI and interactive modes based on mode detection.
 Update --help text to mention interactive mode.
 
 **Acceptance Criteria:**
-- [ ] Add note about interactive mode to help text
-- [ ] Explain how to trigger interactive (no args)
-- [ ] Mention CLI mode still fully supported
-- [ ] Keep existing CLI documentation
+- [x] Add note about interactive mode to help text
+- [x] Explain how to trigger interactive (no args)
+- [x] Mention CLI mode still fully supported
+- [x] Keep existing CLI documentation
 
 **Files Changed:**
 - `cloner.ts` (update help text in main)

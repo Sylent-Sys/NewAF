@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, statSync, readdirSync, unlinkSync, rmSync } from 'fs';
-import { join, dirname, basename, extname, relative } from 'path';
+import { join, dirname, basename, extname, relative, resolve } from 'path';
 import { spawnSync } from 'child_process';
 
 /**
@@ -39,6 +39,531 @@ interface ProjectInfo {
   path: string;
   guid: string;
   dependencies: string[];
+}
+
+interface SolutionInfo {
+  solutionName: string;
+  solutionPath: string;
+  detectedNamespace: string | null;
+  projectCount: number;
+}
+
+// ============================================================================
+// VALIDATION UTILITIES
+// ============================================================================
+
+/**
+ * Validates C# namespace format according to language specification.
+ * @param namespace - The namespace string to validate
+ * @returns true if valid, error message string if invalid
+ */
+function validateNamespaceFormat(namespace: string): boolean | string {
+  // Must not be empty
+  if (!namespace || namespace.trim().length === 0) {
+    return 'Namespace cannot be empty';
+  }
+
+  // Check basic format: start with letter/underscore, contain only valid chars
+  const namespaceRegex = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+  if (!namespaceRegex.test(namespace)) {
+    return 'Namespace must start with a letter or underscore and contain only letters, numbers, dots, and underscores';
+  }
+
+  // Check for consecutive dots or trailing/leading dots
+  if (namespace.includes('..') || namespace.startsWith('.') || namespace.endsWith('.')) {
+    return 'Namespace cannot have consecutive dots or start/end with a dot';
+  }
+
+  // Check for reserved keywords
+  const parts = namespace.split('.');
+  const reservedKeywords = [
+    'abstract', 'as', 'base', 'bool', 'break', 'byte', 'case', 'catch',
+    'char', 'checked', 'class', 'const', 'continue', 'decimal', 'default',
+    'delegate', 'do', 'double', 'else', 'enum', 'event', 'explicit',
+    'extern', 'false', 'finally', 'fixed', 'float', 'for', 'foreach',
+    'goto', 'if', 'implicit', 'in', 'int', 'interface', 'internal',
+    'is', 'lock', 'long', 'namespace', 'new', 'null', 'object',
+    'operator', 'out', 'override', 'params', 'private', 'protected',
+    'public', 'readonly', 'ref', 'return', 'sbyte', 'sealed', 'short',
+    'sizeof', 'stackalloc', 'static', 'string', 'struct', 'switch',
+    'this', 'throw', 'true', 'try', 'typeof', 'uint', 'ulong',
+    'unchecked', 'unsafe', 'ushort', 'using', 'virtual', 'void',
+    'volatile', 'while'
+  ];
+
+  for (const part of parts) {
+    if (reservedKeywords.includes(part.toLowerCase())) {
+      return `Namespace contains reserved keyword: "${part}"`;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Validates that a path exists and is accessible.
+ * @param path - The file system path to validate
+ * @returns true if valid, error message string if invalid
+ */
+function validatePathExists(path: string): boolean | string {
+  if (!path || path.trim().length === 0) {
+    return 'Path cannot be empty';
+  }
+
+  try {
+    if (!existsSync(path)) {
+      return `Path does not exist: ${path}`;
+    }
+    return true;
+  } catch (error: any) {
+    return `Cannot access path: ${error.message}`;
+  }
+}
+
+/**
+ * Validates that a path points to a directory.
+ * @param path - The file system path to validate
+ * @returns true if valid, error message string if invalid
+ */
+function validatePathIsDirectory(path: string): boolean | string {
+  const existsCheck = validatePathExists(path);
+  if (existsCheck !== true) {
+    return existsCheck;
+  }
+
+  try {
+    const stats = statSync(path);
+    if (!stats.isDirectory()) {
+      return `Path is not a directory: ${path}`;
+    }
+    return true;
+  } catch (error: any) {
+    return `Cannot access path: ${error.message}`;
+  }
+}
+
+/**
+ * Validates that a directory contains at least one solution file.
+ * @param path - The directory path to validate
+ * @returns true if valid, error message string if invalid
+ */
+function validateSolutionDirectory(path: string): boolean | string {
+  const dirCheck = validatePathIsDirectory(path);
+  if (dirCheck !== true) {
+    return dirCheck;
+  }
+
+  try {
+    const files = readdirSync(path);
+    const slnFiles = files.filter(f => f.toLowerCase().endsWith('.sln'));
+
+    if (slnFiles.length === 0) {
+      return `No solution file (.sln) found in: ${path}`;
+    }
+
+    return true;
+  } catch (error: any) {
+    return `Cannot read directory: ${error.message}`;
+  }
+}
+
+/**
+ * Ensures new namespace is different from old namespace.
+ * @param oldNs - The old namespace
+ * @param newNs - The new namespace
+ * @returns true if different, error message string if same
+ */
+function validateNamespacesAreDifferent(oldNs: string, newNs: string): boolean | string {
+  if (oldNs === newNs) {
+    return 'New namespace must be different from old namespace';
+  }
+  return true;
+}
+
+/**
+ * Validates target path for cloning operation.
+ * @param targetPath - The target directory path
+ * @param force - Whether force overwrite is enabled
+ * @returns true if valid, error message string if invalid
+ */
+function validateTargetPath(targetPath: string, force: boolean): boolean | string {
+  if (!targetPath || targetPath.trim().length === 0) {
+    return 'Target path cannot be empty';
+  }
+
+  const absPath = resolve(targetPath);
+
+  // Check path length on Windows
+  if (process.platform === 'win32' && absPath.length > 240) {
+    return `Target path is very long (${absPath.length} chars). This may cause issues on Windows.`;
+  }
+
+  // Check if target exists
+  if (existsSync(absPath)) {
+    const stats = statSync(absPath);
+
+    if (!stats.isDirectory()) {
+      return `Target exists but is not a directory: ${absPath}`;
+    }
+
+    // Check if directory is empty
+    const files = readdirSync(absPath);
+    if (files.length > 0 && !force) {
+      return `Target directory is not empty. Use force mode to overwrite.`;
+    }
+  } else {
+    // Target doesn't exist, check parent
+    const parentDir = dirname(absPath);
+    if (!existsSync(parentDir)) {
+      return `Parent directory does not exist: ${parentDir}`;
+    }
+  }
+
+  return true;
+}
+
+// ============================================================================
+// MODE DETECTION
+// ============================================================================
+
+/**
+ * Detects whether to run in CLI or interactive mode based on command-line arguments.
+ * @returns 'cli' if arguments are present, 'interactive' if no arguments
+ */
+function detectMode(): 'cli' | 'interactive' {
+  const args = process.argv.slice(2);
+
+  // If --help, use CLI mode
+  if (args.includes('--help')) {
+    return 'cli';
+  }
+
+  // If --interactive flag, force interactive mode
+  if (args.includes('--interactive')) {
+    return 'interactive';
+  }
+
+  // If any positional args (excluding flags), use CLI mode
+  const positionalArgs = args.filter(arg => !arg.startsWith('--'));
+  if (positionalArgs.length > 0) {
+    return 'cli';
+  }
+
+  return 'interactive';
+}
+
+// ============================================================================
+// INTERACTIVE MODE FUNCTIONS
+// ============================================================================
+
+/**
+ * Prompts user for source directory path with validation.
+ * @returns Absolute path to source directory
+ */
+async function promptSourcePath(): Promise<string> {
+  const { input } = await import('@inquirer/prompts');
+  
+  const sourcePath = await input({
+    message: 'Enter source directory path:',
+    validate: (value: string) => {
+      const pathCheck = validatePathExists(value);
+      if (pathCheck !== true) return pathCheck;
+
+      const dirCheck = validatePathIsDirectory(value);
+      if (dirCheck !== true) return dirCheck;
+
+      const slnCheck = validateSolutionDirectory(value);
+      if (slnCheck !== true) return slnCheck;
+
+      return true;
+    }
+  });
+
+  return resolve(sourcePath);
+}
+
+/**
+ * Detects solution information from source directory.
+ * @param sourcePath - The source directory path
+ * @returns Solution information including name, path, detected namespace, and project count
+ */
+function detectSolutionInfo(sourcePath: string): SolutionInfo {
+  // Find .sln file in source directory
+  const files = readdirSync(sourcePath);
+  const slnFiles = files.filter(f => f.toLowerCase().endsWith('.sln'));
+
+  if (slnFiles.length === 0) {
+    throw new Error(`No solution file found in: ${sourcePath}`);
+  }
+
+  // Use first .sln file found (sorted alphabetically)
+  slnFiles.sort();
+  const solutionName = slnFiles[0].replace('.sln', '');
+  const solutionPath = join(sourcePath, slnFiles[0]);
+
+  // Parse solution to count projects
+  const solutionContent = readFileSync(solutionPath, 'utf-8');
+  const lines = solutionContent.split('\n');
+  let projectCount = 0;
+
+  for (const line of lines) {
+    if (line.trim().startsWith('Project(')) {
+      projectCount++;
+    }
+  }
+
+  // Attempt namespace detection from solution name or first .csproj
+  let detectedNamespace: string | null = null;
+
+  // Try from solution name first
+  if (solutionName.includes('.')) {
+    detectedNamespace = solutionName;
+  }
+
+  // Try from first .csproj if not detected
+  if (!detectedNamespace) {
+    try {
+      const csprojFiles: string[] = [];
+      const findCsproj = (dir: string) => {
+        const items = readdirSync(dir);
+        for (const item of items) {
+          const itemPath = join(dir, item);
+          const stat = statSync(itemPath);
+          if (stat.isDirectory() && !['bin', 'obj', '.vs', '.git'].includes(item)) {
+            findCsproj(itemPath);
+          } else if (item.endsWith('.csproj')) {
+            csprojFiles.push(itemPath);
+          }
+        }
+      };
+      findCsproj(sourcePath);
+
+      if (csprojFiles.length > 0) {
+        const csprojContent = readFileSync(csprojFiles[0], 'utf-8');
+        const namespaceMatch = csprojContent.match(/<RootNamespace>(.*?)<\/RootNamespace>/);
+        if (namespaceMatch) {
+          detectedNamespace = namespaceMatch[1];
+        }
+      }
+    } catch (error) {
+      // Namespace detection failed, will prompt user without default
+    }
+  }
+
+  return {
+    solutionName,
+    solutionPath,
+    detectedNamespace,
+    projectCount
+  };
+}
+
+/**
+ * Prompts user for old and new namespaces with validation.
+ * @param defaultOld - Default value for old namespace (from detection)
+ * @returns Object with old and new namespace strings
+ */
+async function promptNamespaces(defaultOld: string | null): Promise<{ old: string; new: string }> {
+  const { input } = await import('@inquirer/prompts');
+
+  const oldNamespace = await input({
+    message: 'Old namespace:',
+    default: defaultOld || undefined,
+    validate: (value: string) => validateNamespaceFormat(value)
+  });
+
+  const newNamespace = await input({
+    message: 'New namespace:',
+    validate: (value: string) => {
+      const formatCheck = validateNamespaceFormat(value);
+      if (formatCheck !== true) return formatCheck;
+
+      const diffCheck = validateNamespacesAreDifferent(oldNamespace, value);
+      if (diffCheck !== true) return diffCheck;
+
+      return true;
+    }
+  });
+
+  return { old: oldNamespace, new: newNamespace };
+}
+
+/**
+ * Prompts user for target directory path with smart default.
+ * @param suggestedDefault - Suggested default path based on new namespace
+ * @returns Absolute path to target directory
+ */
+async function promptTargetPath(suggestedDefault: string): Promise<string> {
+  const { input } = await import('@inquirer/prompts');
+
+  const targetPath = await input({
+    message: 'Target directory path:',
+    default: suggestedDefault,
+    validate: (value: string) => {
+      // Just check parent exists; we'll handle empty/non-empty later
+      const absPath = resolve(value);
+      if (existsSync(absPath)) {
+        return true; // Will check if needs force later
+      } else {
+        const parentDir = dirname(absPath);
+        if (!existsSync(parentDir)) {
+          return `Parent directory does not exist: ${parentDir}`;
+        }
+      }
+      return true;
+    }
+  });
+
+  return resolve(targetPath);
+}
+
+/**
+ * Prompts user for clone options (template mode and force overwrite).
+ * @param targetPath - The target directory path to check if force is needed
+ * @returns Object with template and force boolean flags
+ */
+async function promptOptions(targetPath: string): Promise<{ template: boolean; force: boolean }> {
+  const { select, confirm } = await import('@inquirer/prompts');
+
+  // Prompt for clone mode
+  const cloneMode = await select({
+    message: 'Clone mode:',
+    choices: [
+      {
+        name: 'Full copy (preserve all business logic)',
+        value: 'full',
+        description: 'Complete copy including all logic files'
+      },
+      {
+        name: 'Template (remove business logic for clean start)',
+        value: 'template',
+        description: 'Removes *Logic folders in BLL, *Repository.cs in DAL, and related DI registrations'
+      }
+    ]
+  });
+
+  const template = cloneMode === 'template';
+
+  // Check if force is needed
+  let force = false;
+  if (existsSync(targetPath)) {
+    const files = readdirSync(targetPath);
+    if (files.length > 0) {
+      console.log('\n⚠️  Warning: Target directory exists and is not empty');
+      force = await confirm({
+        message: 'Overwrite existing files?',
+        default: false
+      });
+    }
+  }
+
+  return { template, force };
+}
+
+/**
+ * Displays a formatted summary of all collected inputs before execution.
+ * @param options - The CloneOptions to display
+ * @param projectCount - Number of projects that will be cloned
+ */
+function showSummary(options: CloneOptions, projectCount: number): void {
+  console.log('\n┌─────────────────────────────────────────────────────────┐');
+  console.log('│ 📋 CLONE SUMMARY                                        │');
+  console.log('├─────────────────────────────────────────────────────────┤');
+  console.log(`│ Source:     ${options.sourcePath.padEnd(42)} │`);
+  console.log(`│ Target:     ${options.targetPath.padEnd(42)} │`);
+  console.log(`│ Namespace:  ${options.oldNamespace} → ${options.newNamespace.padEnd(26)} │`);
+  console.log(`│ Solution:   ${options.oldSolutionName} → ${options.newSolutionName.padEnd(26)} │`);
+  console.log(`│ Projects:   ${projectCount} will be cloned${' '.repeat(32)} │`);
+  console.log(`│ Mode:       ${(options.template ? 'Template (logic removed)' : 'Full copy').padEnd(42)} │`);
+  console.log(`│ Force:      ${(options.force ? 'Yes (overwrite enabled)' : 'No').padEnd(42)} │`);
+  
+  if (options.template) {
+    console.log('│                                                         │');
+    console.log('│ Template mode will remove:                              │');
+    console.log('│  • *Logic folders in BLL projects                       │');
+    console.log('│  • *Repository.cs in DAL projects                       │');
+    console.log('│  • Related DI registrations                             │');
+  }
+  
+  console.log('└─────────────────────────────────────────────────────────┘\n');
+}
+
+/**
+ * Prompts user for final confirmation before starting clone operation.
+ * @returns true to proceed, false to cancel
+ */
+async function confirmProceed(): Promise<boolean> {
+  const { confirm } = await import('@inquirer/prompts');
+  
+  return await confirm({
+    message: 'Proceed with clone?',
+    default: true
+  });
+}
+
+/**
+ * Collects all inputs interactively and assembles CloneOptions.
+ * @returns CloneOptions object ready for cloning
+ */
+async function collectInteractiveInputs(): Promise<CloneOptions> {
+  try {
+    console.log('\n🔧 C# Project Cloner - Interactive Mode\n');
+
+    // Step 1: Source path
+    const sourcePath = await promptSourcePath();
+
+    // Step 2: Detect solution info
+    console.log('\n🔍 Detecting solution information...');
+    const solutionInfo = detectSolutionInfo(sourcePath);
+    console.log(`✓ Found solution: ${solutionInfo.solutionName}.sln`);
+    console.log(`  Projects: ${solutionInfo.projectCount} detected`);
+    if (solutionInfo.detectedNamespace) {
+      console.log(`  Namespace: ${solutionInfo.detectedNamespace} (detected)\n`);
+    } else {
+      console.log(`  Namespace: Could not auto-detect\n`);
+    }
+
+    // Step 3: Namespaces
+    const namespaces = await promptNamespaces(solutionInfo.detectedNamespace);
+
+    // Step 4: Target path
+    const suggestedTarget = `./${namespaces.new}`;
+    const targetPath = await promptTargetPath(suggestedTarget);
+
+    // Step 5: Options
+    const options = await promptOptions(targetPath);
+
+    // Assemble CloneOptions
+    const cloneOptions: CloneOptions = {
+      sourcePath,
+      targetPath,
+      oldNamespace: namespaces.old,
+      newNamespace: namespaces.new,
+      oldSolutionName: solutionInfo.solutionName,
+      newSolutionName: namespaces.new,
+      force: options.force,
+      template: options.template
+    };
+
+    // Step 6: Show summary
+    showSummary(cloneOptions, solutionInfo.projectCount);
+
+    // Step 7: Final confirmation
+    const proceed = await confirmProceed();
+    if (!proceed) {
+      console.log('\n❌ Clone operation cancelled by user.');
+      process.exit(0);
+    }
+
+    return cloneOptions;
+  } catch (error: any) {
+    // Handle Ctrl+C and other interruptions gracefully
+    if (error.name === 'ExitPromptError' || error.code === 'ERR_USE_AFTER_CLOSE') {
+      console.log('\n\n❌ Operation cancelled by user.');
+      process.exit(130); // Standard exit code for SIGINT
+    }
+    throw error;
+  }
 }
 
 class CSharpProjectCloner {
@@ -573,46 +1098,29 @@ class CSharpProjectCloner {
   }
 }
 
-// CLI Interface
-async function main() {
+// ============================================================================
+// CLI PARSER
+// ============================================================================
+
+/**
+ * Parses command-line arguments and returns CloneOptions.
+ * @returns CloneOptions object from CLI arguments
+ */
+function parseCliArgs(): CloneOptions {
   const args = process.argv.slice(2);
-
-  if (args.length < 4 || args.includes('--help')) {
-    console.log(`
-🔧 C# Project Cloner
-
-Usage: bun cloner.ts <source-path> <target-path> <old-namespace> <new-namespace> [old-solution-name] [new-solution-name] [--force] [--template]
-
-Arguments:
-  source-path      Path to the source C# project directory
-  target-path      Path where the new project will be created
-  old-namespace    Current namespace (e.g., "Bion.NAS.Platform")
-  new-namespace    New namespace (e.g., "MyCompany.MyProject")
-  old-solution-name (optional) Current solution name (default: auto-detect)
-  new-solution-name (optional) New solution name (default: based on new namespace)
-
-Options:
-  --force          Overwrite target directory if it exists and is not empty
-  --template       Clone as a template (removes specific business logic, keeps infrastructure)
-
-Examples:
-  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject
-  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject --force --template
-    `);
-    process.exit(1);
-  }
 
   // Parse flags
   const force = args.includes('--force');
   const template = args.includes('--template');
 
-  const cleanArgs = args.filter(arg => arg !== '--force' && arg !== '--template');
+  const cleanArgs = args.filter(arg => !arg.startsWith('--'));
 
   const [sourcePath, targetPath, oldNamespace, newNamespace, oldSolutionName, newSolutionName] = cleanArgs;
 
   // Validate required arguments
   if (!sourcePath || !targetPath || !oldNamespace || !newNamespace) {
     console.error('❌ Missing required arguments');
+    console.error('Run with --help for usage information');
     process.exit(1);
   }
 
@@ -621,7 +1129,7 @@ Examples:
   // Default the new solution name to the FULL new namespace
   const finalNewSolutionName = newSolutionName || newNamespace || 'NewProject';
 
-  const options: CloneOptions = {
+  return {
     sourcePath: sourcePath,
     targetPath: targetPath,
     oldNamespace: oldNamespace,
@@ -631,9 +1139,80 @@ Examples:
     force: force,
     template: template
   };
+}
 
-  const cloner = new CSharpProjectCloner(options);
-  await cloner.clone();
+// ============================================================================
+// MAIN ENTRY POINT
+// ============================================================================
+
+async function main() {
+  const mode = detectMode();
+
+  // Handle --help flag
+  if (process.argv.includes('--help')) {
+    console.log(`
+🔧 C# Project Cloner
+
+Usage: 
+  Interactive mode: bun cloner.ts
+  CLI mode:         bun cloner.ts <source-path> <target-path> <old-namespace> <new-namespace> [old-solution-name] [new-solution-name] [--force] [--template]
+
+Interactive Mode:
+  Run without arguments to start an interactive guided wizard that will:
+  • Auto-detect solution and namespace information
+  • Validate inputs at each step
+  • Show a summary before cloning
+  • Provide helpful error messages
+
+CLI Mode Arguments:
+  source-path       Path to the source C# project directory
+  target-path       Path where the new project will be created
+  old-namespace     Current namespace (e.g., "Bion.NAS.Platform")
+  new-namespace     New namespace (e.g., "MyCompany.MyProject")
+  old-solution-name (optional) Current solution name (default: auto-detect)
+  new-solution-name (optional) New solution name (default: based on new namespace)
+
+Options:
+  --force           Overwrite target directory if it exists and is not empty
+  --template        Clone as a template (removes specific business logic, keeps infrastructure)
+  --interactive     Force interactive mode even with some arguments present
+  --help            Show this help message
+
+Examples:
+  # Interactive mode (recommended for first-time users)
+  bun cloner.ts
+
+  # CLI mode (for automation and scripts)
+  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject
+  bun cloner.ts ./SSG1-BION-NAS-Platform ./MyNewProject Bion.NAS.Platform MyCompany.MyProject --force --template
+
+Template Mode:
+  When --template is used, the following will be removed:
+  • *Logic folders in BLL projects
+  • *Repository.cs files in DAL projects
+  • Related dependency injection registrations in Startup.cs/Program.cs
+    `);
+    process.exit(0);
+  }
+
+  try {
+    let options: CloneOptions;
+
+    if (mode === 'interactive') {
+      // Interactive mode: guided prompts
+      options = await collectInteractiveInputs();
+    } else {
+      // CLI mode: parse command-line arguments
+      options = parseCliArgs();
+    }
+
+    // Execute clone with the assembled options
+    const cloner = new CSharpProjectCloner(options);
+    await cloner.clone();
+  } catch (error: any) {
+    console.error('\n❌ Error:', error.message || error);
+    process.exit(1);
+  }
 }
 
 // Run the script
